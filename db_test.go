@@ -1,4 +1,9 @@
+// bagdb: Simple datastorage
+// Copyright 2021 bagdb authors
+// SPDX-License-Identifier: BSD-3-Clause
+
 package bagdb
+
 
 import (
 	"os"
