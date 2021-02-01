@@ -39,7 +39,7 @@ type Bucket struct {
 // If the bucket already exists, it's opened and read, which populates the
 // internal gap-list.
 // The onData callback is optional, and can be nil.
-func openBucket(slotSize uint16, onData IteratorCallback) (*Bucket, error) {
+func openBucket(slotSize uint16, onData onBucketDataFn) (*Bucket, error) {
 	id := fmt.Sprintf("bkt_%08d.bag", slotSize)
 	f, err := os.OpenFile(id, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
@@ -194,12 +194,12 @@ func (bucket *Bucket) getSlot() uint64 {
 	return slot
 }
 
-// IteratorCallback is used to iterate the entire dataset in the bucket.
+// onBucketDataFn is used to iterate the entire dataset in the bucket.
 // After the method returns, the content of 'data' will be modified by
 // the iterator, so it needs to be copied if it is to be used later.
-type IteratorCallback func(slot uint64, data []byte)
+type onBucketDataFn func(slot uint64, data []byte)
 
-func (bucket *Bucket) Iterate(onData IteratorCallback) {
+func (bucket *Bucket) Iterate(onData onBucketDataFn) {
 
 	bucket.fileMu.RLock()
 	defer bucket.fileMu.RUnlock()

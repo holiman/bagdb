@@ -15,16 +15,16 @@ type Database interface {
 	// Put stores the data to the underlying database, and returns the key needed
 	// for later accessing the data.
 	// The data is copied by the database, and is safe to modify after the method returns
-	Put(data []byte) uint32
+	Put(data []byte) uint64
 
 	// Get retrieves the data stored at the given key.
-	Get(key uint32) ([]byte, error)
+	Get(key uint64) []byte
 
 	// Delete marks the data for deletion, which means it will (eventually) be
 	// overwritten by other data. After calling Delete with a given key, the results
 	// from doing Get(key) is undefined -- it may return the same data, or some other
 	// data, or fail with an error.
-	Delete(key uint32) error
+	Delete(key uint64) error
 }
 
 type DB struct {
@@ -32,7 +32,12 @@ type DB struct {
 	dbErr   error
 }
 
-func Open(path string, smallest, max int) (*DB, error) {
+// Open opens a (new or existing) database with the given limits.
+// If bucket already exists, they are opened and read, in order to populate the
+// internal gap-list.
+// While doing so, it's a good opportunity for the caller to read the data out,
+// (which is probably desirable), which can be done using the optional onData callback.
+func Open(path string, smallest, max int, onData OnDataFn) (Database, error) {
 	if smallest < 128 {
 		return nil, fmt.Errorf("Too small slot size: %d, need at least %d", smallest, 128)
 	}
@@ -41,7 +46,7 @@ func Open(path string, smallest, max int) (*DB, error) {
 	}
 	db := &DB{}
 	for v := smallest; v < max; v += v {
-		bucket, err := openBucket(uint16(v), nil)
+		bucket, err := openBucket(uint16(v), wrapBucketDataFn(len(db.buckets), onData))
 		if err != nil {
 			db.Close() // Close buckets
 			return nil, err
@@ -51,6 +56,9 @@ func Open(path string, smallest, max int) (*DB, error) {
 	return db, nil
 }
 
+// Put stores the data to the underlying database, and returns the key needed
+// for later accessing the data.
+// The data is copied by the database, and is safe to modify after the method returns
 func (db *DB) Put(data []byte) uint64 {
 	for i, b := range db.buckets {
 		if int(b.slotSize) > len(data) {
@@ -62,20 +70,49 @@ func (db *DB) Put(data []byte) uint64 {
 			return slot
 		}
 	}
-	panic("whaa")
+	panic(fmt.Sprintf("No bucket found for size %d", len(data)))
 }
 
+// Get retrieves the data stored at the given key.
 func (db *DB) Get(key uint64) []byte {
 	id := int(key >> 24)
 	return db.buckets[id].Get(key & 0x00FFFFFF)
 }
 
+// Delete marks the data for deletion, which means it will (eventually) be
+// overwritten by other data. After calling Delete with a given key, the results
+// from doing Get(key) is undefined -- it may return the same data, or some other
+// data, or fail with an error.
 func (db *DB) Delete(key uint64) error {
 	id := int(key >> 24)
 	db.buckets[id].Delete(key & 0x00FFFFFF)
 	return nil
 }
 
+// OnDataFn is used to iterate the entire dataset in the DB.
+// After the method returns, the content of 'data' will be modified by
+// the iterator, so it needs to be copied if it is to be used later.
+type OnDataFn func(key uint64, data []byte)
+
+func wrapBucketDataFn(bucketId int, onData OnDataFn) onBucketDataFn {
+	if onData == nil {
+		return nil
+	}
+	return func(slot uint64, data []byte) {
+		key := slot & uint64(bucketId) << 24
+		onData(key, data)
+	}
+}
+
+// Iterate iterates through all the data in the DB, and invokes the
+// given onData method for every element
+func (db *DB) Iterate(onData OnDataFn) {
+	for i, b := range db.buckets {
+		b.Iterate(wrapBucketDataFn(i, onData))
+	}
+}
+
+// Close implements io.Closer
 func (db *DB) Close() error {
 	var err error
 	for _, bucket := range db.buckets {
