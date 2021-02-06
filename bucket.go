@@ -300,3 +300,81 @@ func (bucket *Bucket) Iterate(onData onBucketDataFn) {
 	}
 	bucket.gaps = append(bucket.gaps, newGaps...)
 }
+
+// compactBucket moves data 'up' to fill gaps, and truncates the file afterwards.
+// This operation must only be performed during the opening of the bucket.
+func (bucket *Bucket) compact(onData onBucketDataFn) {
+	bucket.gapsMu.Lock()
+	defer bucket.gapsMu.Unlock()
+	bucket.fileMu.RLock()
+	defer bucket.fileMu.RUnlock()
+
+	buf := make([]byte, bucket.slotSize)
+
+	// readSlot reads data from the given slot and returns the declared size.
+	// The data is placed into 'buf'
+	readSlot := func(slot uint64) uint32 {
+		n, _ := bucket.f.ReadAt(buf, int64(slot)*int64(bucket.slotSize))
+		if n < itemHeaderSize {
+			panic(fmt.Sprintf("too short, need %d bytes, got %d", itemHeaderSize, n))
+		}
+		return binary.BigEndian.Uint32(buf)
+	}
+	writeBuf := func(slot uint64) {
+		n, _ := bucket.f.WriteAt(buf, int64(slot)*int64(bucket.slotSize))
+		if n < len(buf) {
+			panic(fmt.Sprintf("write too short, wrote %d bytes, wanted to write %d", n, len(buf)))
+		}
+	}
+
+	nextGap := func(slot uint64) uint64 {
+		for ; slot < bucket.tail; slot++ {
+			if size := readSlot(slot); size == 0 {
+				// We've found a gap
+				return slot
+			} else {
+				onData(slot, buf)
+			}
+		}
+		return slot
+	}
+	prevData := func(slot, gap uint64) uint64 {
+		for ; slot > 0; slot-- {
+			if size := readSlot(slot); size != 0 {
+				// We've found a slot of data. Copy it to the gap
+				writeBuf(gap)
+				onData(gap, buf)
+				return slot
+			}
+		}
+		return 0
+	}
+	var (
+		gapSlot  = uint64(0)
+		dataSlot = bucket.tail
+	)
+	// This is very much work in progress and experimental. The idea is to
+	// go through the file from two directions:
+	// forwards: search for gaps,
+	// backwards: searh for data to move into the gaps
+	// The two searches happen in turns, and if both find a match, the
+	// data is moved from the slot to the gap.
+	//
+	// TODO: verify ondata calling,
+	// TODO: test that exit-conditions are correct
+	// TODO: trim slack-space at the end, after iteration is done + set tail
+	for gapSlot < dataSlot {
+		gapSlot = nextGap(gapSlot)
+		if gapSlot >= bucket.tail {
+			break // done here
+		}
+		dataSlot := prevData(dataSlot, gapSlot)
+		if dataSlot <= 1 {
+			// No more?
+			break
+		}
+		gapSlot++
+		dataSlot--
+	}
+	bucket.gaps = make([]uint64, 0)
+}
