@@ -36,7 +36,7 @@ func checkBlob(fill byte, blob []byte, size int) error {
 // - Test that Close properly writes the holes
 // - Test Put / Delete in parallel
 // - Test that simultaneous filewrites to different parts of the file don't cause problems
-
+// - Test that deletions properly truncate the file
 func TestBucket(t *testing.T) {
 	b, err := openBucket(200, nil)
 	defer b.Close()
@@ -44,34 +44,42 @@ func TestBucket(t *testing.T) {
 		t.Fatal(err)
 	}
 	aa, _ := b.Put(getBlob(0x0a, 150))
-	fmt.Printf("Placed the data into slot: %x\n", aa)
+	fmt.Printf("Placed the data into slot: %d\n", aa)
 	bb, _ := b.Put(getBlob(0x0b, 150))
-	fmt.Printf("Placed the data into slot: %x\n", bb)
+	fmt.Printf("Placed the data into slot: %d\n", bb)
 	cc, _ := b.Put(getBlob(0x0c, 150))
-	fmt.Printf("Placed the data into slot: %x\n", cc)
+	fmt.Printf("Placed the data into slot: %d\n", cc)
 	dd, err := b.Put(getBlob(0x0d, 150))
-	fmt.Printf("Placed the data into slot: %x\n", dd)
+	fmt.Printf("Placed the data into slot: %d\n", dd)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fmt.Printf("Slot: %x\n", dd)
-	if err := checkBlob(0x0a, b.Get(aa), 150); err != nil {
+	get := func(slot uint64) []byte {
+		t.Helper()
+		data, err := b.Get(slot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	if err := checkBlob(0x0a, get(aa), 150); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkBlob(0x0b, b.Get(bb), 150); err != nil {
+	if err := checkBlob(0x0b, get(bb), 150); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkBlob(0x0c, b.Get(cc), 150); err != nil {
+	if err := checkBlob(0x0c, get(cc), 150); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkBlob(0x0d, b.Get(dd), 150); err != nil {
+	if err := checkBlob(0x0d, get(dd), 150); err != nil {
 		t.Fatal(err)
 	}
 
 	b.Delete(bb)
 	b.Delete(cc)
 	b.Delete(aa)
-	//b.Delete(1)
+	b.Delete(dd)
 
 	b.Iterate(func(slot uint64, data []byte) {
 		fmt.Printf("Slot %d appears to contain %d bytes of %x\n", slot, len(data), data[0])

@@ -26,13 +26,29 @@ var ErrClosed = errors.New("bucket closed")
 // a number of slots, where each slot is of the exact same size.
 type Bucket struct {
 	id       string
-	slotSize uint16       // Size of the slots, up to 65K
-	tail     uint64       // First free slot
-	gaps     []uint64     // A slice of indices to slots that are free to use.
-	gapsMu   sync.Mutex   // Mutex for operating on the gaps slice
-	f        *os.File     // The file backing the data
-	fileMu   sync.RWMutex // Mutex for file operations (rw versus Close)
-	closed   bool
+	slotSize uint16 // Size of the slots, up to 65K
+
+	gapsMu sync.Mutex // Mutex for operating on 'gaps' and 'tail'
+	gaps   []uint64   // A slice of indices to slots that are free to use.
+	tail   uint64     // First free slot
+
+	fileMu sync.RWMutex // Mutex for file operations on 'f' (rw versus Close) and closed
+	f      *os.File     // The file backing the data
+	closed bool
+}
+
+type uint64Slice []uint64
+
+func (u uint64Slice) Len() int {
+	return len(u)
+}
+
+func (u uint64Slice) Less(i, j int) bool {
+	return u[i] < u[j]
+}
+
+func (u uint64Slice) Swap(i, j int) {
+	u[i], u[j] = u[j], u[i]
 }
 
 // openBucket opens a (new or existing) bucket with the given slot size.
@@ -64,6 +80,11 @@ func openBucket(slotSize uint16, onData onBucketDataFn) (*Bucket, error) {
 }
 
 func (bucket *Bucket) Close() error {
+	// We don't need the gapsMu until later, but order matters: all places
+	// which require both mutexes first obtain gapsMu, and _then_ fileMu.
+	// If one place uses a different order, then a deadlock is possible
+	bucket.gapsMu.Lock()
+	defer bucket.gapsMu.Unlock()
 	bucket.fileMu.Lock()
 	defer bucket.fileMu.Unlock()
 	if bucket.closed {
@@ -73,9 +94,6 @@ func (bucket *Bucket) Close() error {
 	// Before closing the file, we overwrite all gaps with
 	// blank space in the headers. Later on, when opening, we can reconstruct the
 	// gaps by skimming through the slots and checking the headers.
-	//
-	bucket.gapsMu.Lock()
-	defer bucket.gapsMu.Unlock()
 	hdr := make([]byte, 4)
 	var err error
 	for _, gap := range bucket.gaps {
@@ -131,13 +149,38 @@ func (bucket *Bucket) Delete(slot uint64) {
 	bucket.gapsMu.Lock()
 	defer bucket.gapsMu.Unlock()
 	bucket.gaps = append(bucket.gaps, slot)
+	// We try to keep writes going to the early parts of the file, to have the
+	// possibility of trimming the file when/if the tail becomes unused.
+	// Hence, order the gaps
+	sort.Sort(uint64Slice(bucket.gaps))
+	// We might be able to trim the file, or even fully delete it.
+	index := len(bucket.gaps) - 1
+	if bucket.tail == bucket.gaps[index]+1 {
+		// we can delete a portion of the file
+		bucket.fileMu.Lock()
+		defer bucket.fileMu.Unlock()
+		if bucket.closed {
+			// Undo (not really important, but correct) and back out again
+			bucket.gaps = bucket.gaps[:len(bucket.gaps)-1]
+			return
+		}
+		for len(bucket.gaps) > 0 && bucket.tail == bucket.gaps[index]+1 {
+			bucket.gaps = bucket.gaps[:index]
+			bucket.tail--
+			index--
+		}
+		bucket.f.Truncate(int64(bucket.tail * uint64(bucket.slotSize)))
+	}
 }
 
 // Get returns the data at the given slot. If the slot has been deleted, the returndata
 // this method is undefined: it may return the original data, or some newer data
 // which has been written into the slot after Delete was called.
-func (bucket *Bucket) Get(slot uint64) []byte {
-	data, _ := bucket.readFile(slot)
+func (bucket *Bucket) Get(slot uint64) ([]byte, error) {
+	data, err := bucket.readFile(slot)
+	if err != nil {
+		return nil, err
+	}
 	if len(data) < itemHeaderSize {
 		panic(fmt.Sprintf("too short, need %d bytes, got %d", itemHeaderSize, len(data)))
 	}
@@ -145,7 +188,7 @@ func (bucket *Bucket) Get(slot uint64) []byte {
 	if blobLen+uint32(itemHeaderSize) > uint32(len(data)) {
 		panic(fmt.Sprintf("too short, need %d bytes, got %d", blobLen+itemHeaderSize, len(data)))
 	}
-	return data[itemHeaderSize : itemHeaderSize+blobLen]
+	return data[itemHeaderSize : itemHeaderSize+blobLen], nil
 }
 
 func (bucket *Bucket) readFile(slot uint64) ([]byte, error) {
@@ -180,12 +223,12 @@ func (bucket *Bucket) writeFile(hdr, data []byte, slot uint64) error {
 
 func (bucket *Bucket) getSlot() uint64 {
 	var slot uint64
-	// Locate a free slot
+	// Locate the first free slot
 	bucket.gapsMu.Lock()
 	defer bucket.gapsMu.Unlock()
 	if nGaps := len(bucket.gaps); nGaps > 0 {
-		slot = bucket.gaps[nGaps-1]
-		bucket.gaps = bucket.gaps[:nGaps-1]
+		slot = bucket.gaps[0]
+		bucket.gaps = bucket.gaps[1:]
 		return slot
 	}
 	// No gaps available: Expand the tail
@@ -201,14 +244,15 @@ type onBucketDataFn func(slot uint64, data []byte)
 
 func (bucket *Bucket) Iterate(onData onBucketDataFn) {
 
+	bucket.gapsMu.Lock()
+	defer bucket.gapsMu.Unlock()
+
 	bucket.fileMu.RLock()
 	defer bucket.fileMu.RUnlock()
 	if bucket.closed {
 		return
 	}
 
-	bucket.gapsMu.Lock()
-	defer bucket.gapsMu.Unlock()
 	buf := make([]byte, bucket.slotSize)
 	// sort the known gaps, so we can skip them easily
 	sort.Slice(bucket.gaps, func(i, j int) bool {

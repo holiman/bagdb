@@ -18,7 +18,7 @@ type Database interface {
 	Put(data []byte) uint64
 
 	// Get retrieves the data stored at the given key.
-	Get(key uint64) []byte
+	Get(key uint64) ([]byte, error)
 
 	// Delete marks the data for deletion, which means it will (eventually) be
 	// overwritten by other data. After calling Delete with a given key, the results
@@ -74,7 +74,7 @@ func (db *DB) Put(data []byte) uint64 {
 }
 
 // Get retrieves the data stored at the given key.
-func (db *DB) Get(key uint64) []byte {
+func (db *DB) Get(key uint64) ([]byte, error) {
 	id := int(key >> 24)
 	return db.buckets[id].Get(key & 0x00FFFFFF)
 }
