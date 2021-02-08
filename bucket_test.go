@@ -5,7 +5,11 @@
 package bagdb
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"io/ioutil"
+	"os"
 	"testing"
 )
 
@@ -84,4 +88,80 @@ func TestBucket(t *testing.T) {
 	b.Iterate(func(slot uint64, data []byte) {
 		fmt.Printf("Slot %d appears to contain %d bytes of %x\n", slot, len(data), data[0])
 	})
+}
+
+func writeBucketFile(name string, size int, slotData []byte) error {
+	var bucketData = make([]byte, len(slotData)*size)
+	// Fill all the items
+	for i, byt := range slotData {
+		if byt == 0 {
+			continue
+		}
+		data := getBlob(byt, size-itemHeaderSize)
+		// write header
+		binary.BigEndian.PutUint32(bucketData[i*size:], uint32(size-itemHeaderSize))
+		// write data
+		copy(bucketData[i*size+itemHeaderSize:], data)
+	}
+	f, err := os.Create(name)
+	if err != nil {
+		return err
+	}
+	f.Write(bucketData)
+	return nil
+}
+
+func checkIdentical(fileA, fileB string) error {
+	var (
+		dataA []byte
+		dataB []byte
+		err   error
+	)
+	dataA, err = ioutil.ReadFile(fileA)
+	if err != nil {
+		return fmt.Errorf("failed to open %v: %v", fileA, err)
+	}
+	dataB, err = ioutil.ReadFile(fileB)
+	if err != nil {
+		return fmt.Errorf("failed to open %v: %v", fileB, err)
+	}
+	if !bytes.Equal(dataA, dataB) {
+		return fmt.Errorf("data differs: \n%x\n%x", dataA, dataB)
+	}
+	return nil
+}
+
+func TestCompaction(t *testing.T) {
+	var (
+		a   *Bucket
+		b   *Bucket
+		err error
+	)
+	if err = writeBucketFile("a", 10, []byte{1, 0, 3, 0, 5, 0, 6, 0, 4, 0, 2, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove("a")
+	if err = writeBucketFile("b", 10, []byte{1, 2, 3, 4, 5, 6}); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove("b")
+	// The order and content that we expect for the onData
+	expOnData := []byte{1, 2, 3, 4, 5, 6}
+	var haveOnData []byte
+	onData := func(slot uint64, data []byte) {
+		haveOnData = append(haveOnData, data[0])
+	}
+	/// Now open them as buckets
+	a, err = openBucketAs("a", 10, onData)
+	b, err = openBucketAs("b", 10, nil)
+	a.Close()
+	b.Close()
+	// Check the content of the files
+	if err := checkIdentical("a", "b"); err != nil {
+		t.Fatal(err)
+	}
+	// And the content of the onData callback
+	if !bytes.Equal(expOnData, haveOnData) {
+		t.Fatalf("onData wrong, expected \n%x\ngot\n%x\n", expOnData, haveOnData)
+	}
 }

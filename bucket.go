@@ -51,12 +51,8 @@ func (u uint64Slice) Swap(i, j int) {
 	u[i], u[j] = u[j], u[i]
 }
 
-// openBucket opens a (new or existing) bucket with the given slot size.
-// If the bucket already exists, it's opened and read, which populates the
-// internal gap-list.
-// The onData callback is optional, and can be nil.
-func openBucket(slotSize uint16, onData onBucketDataFn) (*Bucket, error) {
-	id := fmt.Sprintf("bkt_%08d.bag", slotSize)
+// openBucketAs is mainly exposed for testing purposes
+func openBucketAs(id string, slotSize uint16, onData onBucketDataFn) (*Bucket, error) {
 	f, err := os.OpenFile(id, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return nil, err
@@ -74,9 +70,18 @@ func openBucket(slotSize uint16, onData onBucketDataFn) (*Bucket, error) {
 		tail:     nSlots,
 		f:        f,
 	}
-	// Iterate once, this causes the gaps to be reconstructed
-	bucket.Iterate(onData)
+	// Compact + iterate
+	bucket.compact(onData)
 	return bucket, nil
+}
+
+// openBucket opens a (new or existing) bucket with the given slot size.
+// If the bucket already exists, it's opened and read, which populates the
+// internal gap-list.
+// The onData callback is optional, and can be nil.
+func openBucket(slotSize uint16, onData onBucketDataFn) (*Bucket, error) {
+	id := fmt.Sprintf("bkt_%08d.bag", slotSize)
+	return openBucketAs(id, slotSize, onData)
 }
 
 func (bucket *Bucket) Close() error {
@@ -316,7 +321,7 @@ func (bucket *Bucket) compact(onData onBucketDataFn) {
 	readSlot := func(slot uint64) uint32 {
 		n, _ := bucket.f.ReadAt(buf, int64(slot)*int64(bucket.slotSize))
 		if n < itemHeaderSize {
-			panic(fmt.Sprintf("too short, need %d bytes, got %d", itemHeaderSize, n))
+			panic(fmt.Sprintf("failed reading slot %d, need %d bytes, got %d", slot, itemHeaderSize, n))
 		}
 		return binary.BigEndian.Uint32(buf)
 	}
@@ -332,8 +337,8 @@ func (bucket *Bucket) compact(onData onBucketDataFn) {
 			if size := readSlot(slot); size == 0 {
 				// We've found a gap
 				return slot
-			} else {
-				onData(slot, buf)
+			} else if onData != nil {
+				onData(slot, buf[itemHeaderSize:itemHeaderSize+size])
 			}
 		}
 		return slot
@@ -343,7 +348,9 @@ func (bucket *Bucket) compact(onData onBucketDataFn) {
 			if size := readSlot(slot); size != 0 {
 				// We've found a slot of data. Copy it to the gap
 				writeBuf(gap)
-				onData(gap, buf)
+				if onData != nil {
+					onData(gap, buf[itemHeaderSize:itemHeaderSize+size])
+				}
 				return slot
 			}
 		}
@@ -351,30 +358,33 @@ func (bucket *Bucket) compact(onData onBucketDataFn) {
 	}
 	var (
 		gapSlot  = uint64(0)
-		dataSlot = bucket.tail
+		dataSlot = bucket.tail - 1
 	)
-	// This is very much work in progress and experimental. The idea is to
-	// go through the file from two directions:
-	// forwards: search for gaps,
-	// backwards: searh for data to move into the gaps
+	// The compaction / iteration goes through the file two directions:
+	// - forwards: search for gaps,
+	// - backwards: searh for data to move into the gaps
 	// The two searches happen in turns, and if both find a match, the
-	// data is moved from the slot to the gap.
-	//
-	// TODO: verify ondata calling,
-	// TODO: test that exit-conditions are correct
-	// TODO: trim slack-space at the end, after iteration is done + set tail
+	// data is moved from the slot to the gap. Once the two searches cross eachother,
+	// the algorithm is finished.
+	// This algorithm reads minimal number of items and performs minimal
+	// number of writes.
 	for gapSlot < dataSlot {
 		gapSlot = nextGap(gapSlot)
 		if gapSlot >= bucket.tail {
 			break // done here
 		}
-		dataSlot := prevData(dataSlot, gapSlot)
+		dataSlot = prevData(dataSlot, gapSlot)
 		if dataSlot <= 1 {
 			// No more?
 			break
 		}
 		gapSlot++
 		dataSlot--
+	}
+	if gapSlot >= dataSlot {
+		// Some gc was performed. gapSlot is the first empty slot now
+		bucket.tail = gapSlot
+		bucket.f.Truncate(int64(bucket.tail * uint64(bucket.slotSize)))
 	}
 	bucket.gaps = make([]uint64, 0)
 }
