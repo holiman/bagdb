@@ -20,7 +20,13 @@ const (
 	maxSlotSize    = 0xffffffff
 )
 
-var ErrClosed = errors.New("bucket closed")
+var (
+	ErrClosed      = errors.New("bucket closed")
+	ErrOversized   = errors.New("data too large for bucket")
+	ErrBadIndex    = errors.New("bad index")
+	ErrEmptyData   = errors.New("empty data")
+	ErrCorruptData = errors.New("corrupt data")
+)
 
 // A Bucket represents a collection of similarly-sized items. The bucket uses
 // a number of slots, where each slot is of the exact same size.
@@ -128,8 +134,11 @@ func (bucket *Bucket) Update(data []byte, slot uint64) error {
 // modify the data after this method returns.
 func (bucket *Bucket) Put(data []byte) (uint64, error) {
 	// Validations
+	if len(data) == 0 {
+		return 0, ErrEmptyData
+	}
 	if have, max := uint16(len(data)+itemHeaderSize), bucket.slotSize; have > max {
-		panic(fmt.Errorf("data too large for this bucket, got %d > %d", have, max))
+		return 0, ErrOversized
 	}
 	// Find a free slot
 	slot := bucket.getSlot()
@@ -149,10 +158,14 @@ func (bucket *Bucket) Put(data []byte) (uint64, error) {
 // cause the next two writes to both write into the same slot.
 // Delete does not touch the disk. When the bucket is Close():d, any remaining
 // gaps will be marked as such in the backing file.
-func (bucket *Bucket) Delete(slot uint64) {
+func (bucket *Bucket) Delete(slot uint64) error {
 	// Mark gap
 	bucket.gapsMu.Lock()
 	defer bucket.gapsMu.Unlock()
+	// Can't delete outside of the file
+	if slot >= bucket.tail {
+		return ErrBadIndex
+	}
 	bucket.gaps = append(bucket.gaps, slot)
 	// We try to keep writes going to the early parts of the file, to have the
 	// possibility of trimming the file when/if the tail becomes unused.
@@ -166,8 +179,8 @@ func (bucket *Bucket) Delete(slot uint64) {
 		defer bucket.fileMu.Unlock()
 		if bucket.closed {
 			// Undo (not really important, but correct) and back out again
-			bucket.gaps = bucket.gaps[:len(bucket.gaps)-1]
-			return
+			bucket.gaps = bucket.gaps[:0]
+			return ErrClosed
 		}
 		for len(bucket.gaps) > 0 && bucket.tail == bucket.gaps[index]+1 {
 			bucket.gaps = bucket.gaps[:index]
@@ -176,6 +189,7 @@ func (bucket *Bucket) Delete(slot uint64) {
 		}
 		bucket.f.Truncate(int64(bucket.tail * uint64(bucket.slotSize)))
 	}
+	return nil
 }
 
 // Get returns the data at the given slot. If the slot has been deleted, the returndata
@@ -184,20 +198,12 @@ func (bucket *Bucket) Delete(slot uint64) {
 func (bucket *Bucket) Get(slot uint64) ([]byte, error) {
 	data, err := bucket.readFile(slot)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrBadIndex, err)
 	}
-	if len(data) < itemHeaderSize {
-		panic(fmt.Sprintf("too short, need %d bytes, got %d", itemHeaderSize, len(data)))
-	}
-	blobLen := binary.BigEndian.Uint32(data)
-	if blobLen+uint32(itemHeaderSize) > uint32(len(data)) {
-		panic(fmt.Sprintf("too short, need %d bytes, got %d", blobLen+itemHeaderSize, len(data)))
-	}
-	return data[itemHeaderSize : itemHeaderSize+blobLen], nil
+	return data, nil
 }
 
 func (bucket *Bucket) readFile(slot uint64) ([]byte, error) {
-	buf := make([]byte, bucket.slotSize)
 	// We're read-locking this to prevent the file from being closed while we're
 	// reading from it
 	bucket.fileMu.RLock()
@@ -205,8 +211,23 @@ func (bucket *Bucket) readFile(slot uint64) ([]byte, error) {
 	if bucket.closed {
 		return nil, ErrClosed
 	}
-	n, _ := bucket.f.ReadAt(buf, int64(slot)*int64(bucket.slotSize))
-	return buf[:n], nil
+	offset := int64(slot) * int64(bucket.slotSize)
+	// Read header
+	hdr := make([]byte, itemHeaderSize)
+	_, err := bucket.f.ReadAt(hdr, offset)
+	if err != nil {
+		return nil, err
+	}
+	// Check data size
+	blobLen := binary.BigEndian.Uint32(hdr)
+	if blobLen+uint32(itemHeaderSize) > uint32(bucket.slotSize) {
+		return nil, ErrCorruptData
+	}
+	// Read data
+	buf := make([]byte, blobLen)
+	//fmt.Printf("readAt(%d, %d)\n", len(buf), int64(slot)*int64(bucket.slotSize))
+	_, err = bucket.f.ReadAt(buf, offset+itemHeaderSize)
+	return buf, err
 }
 
 func (bucket *Bucket) writeFile(hdr, data []byte, slot uint64) error {
@@ -374,10 +395,6 @@ func (bucket *Bucket) compact(onData onBucketDataFn) {
 			break // done here
 		}
 		dataSlot = prevData(dataSlot, gapSlot)
-		if dataSlot <= 1 {
-			// No more?
-			break
-		}
 		gapSlot++
 		dataSlot--
 	}

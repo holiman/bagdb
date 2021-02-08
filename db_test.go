@@ -4,27 +4,26 @@
 
 package bagdb
 
-
 import (
 	"os"
 	"testing"
 )
 
-func TestGrowFile(t *testing.T){
+func TestGrowFile(t *testing.T) {
 	f, err := os.Create("tempfile")
-	if err != nil{
+	if err != nil {
 		t.Fatal(err)
 	}
 	//defer os.Remove("tempfile")
 	defer f.Close()
-	f.Seek(55,0)
+	f.Seek(55, 0)
 	//f.WriteAt()
 	f.Write([]byte("test"))
 }
 
-func TestGrowFile2(t *testing.T){
+func TestGrowFile2(t *testing.T) {
 	f, err := os.Create("tempfile2")
-	if err != nil{
+	if err != nil {
 		t.Fatal(err)
 	}
 	//defer os.Remove("tempfile")
