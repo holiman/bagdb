@@ -59,9 +59,9 @@ we have very special circumstances:
 Saying that we can't do compaction is not strictly true: there are two things that can be (and are) done to minimize the disk usage. 
 
 - Truncate-on-delete
-  Truncate-on-delete is what it sounds like: when we delete items at the end of the file, we truncate the file. This has a slight performance hit: a normal delete 
+  - Truncate-on-delete is what it sounds like: when we delete items at the end of the file, we truncate the file. This has a slight performance hit: a normal delete 
    never touches the disk, but only appends to the in-memory `gap` slice. In order to increase the chance for an opportunity to delete, the `gaps` are kept sorted, and 
    we always prefer writing to lower gaps, leaving the higher gaps for later. 
 - Compact-on-open
-  Compact-on-open uses the fact that before the external calles is notified about the data content, we have the freedom to reorder the data, and uses this 
+  - Compact-on-open uses the fact that before the external calles is notified about the data content, we have the freedom to reorder the data, and uses this 
   period overwrite any gaps and truncate the underlying file. 
