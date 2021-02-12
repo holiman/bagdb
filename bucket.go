@@ -164,7 +164,7 @@ func (bucket *Bucket) Delete(slot uint64) error {
 	defer bucket.gapsMu.Unlock()
 	// Can't delete outside of the file
 	if slot >= bucket.tail {
-		return ErrBadIndex
+		return fmt.Errorf("%w: bucket %d, slot %d, tail %d", ErrBadIndex, bucket.slotSize, slot, bucket.tail)
 	}
 	bucket.gaps = append(bucket.gaps, slot)
 	// We try to keep writes going to the early parts of the file, to have the

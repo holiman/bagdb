@@ -38,9 +38,9 @@ type DB struct {
 // While doing so, it's a good opportunity for the caller to read the data out,
 // (which is probably desirable), which can be done using the optional onData callback.
 func Open(path string, smallest, max int, onData OnDataFn) (Database, error) {
-	if smallest < 128 {
-		return nil, fmt.Errorf("Too small slot size: %d, need at least %d", smallest, 128)
-	}
+	//if smallest < 128 {
+	//	return nil, fmt.Errorf("Too small slot size: %d, need at least %d", smallest, 128)
+	//}
 	if smallest > maxSlotSize {
 		return nil, fmt.Errorf("Too large slot size: %d, max is %d", smallest, maxSlotSize)
 	}
@@ -66,7 +66,7 @@ func (db *DB) Put(data []byte) uint64 {
 			if err != nil {
 				panic(fmt.Sprintf("Error in Put: %v\n", err))
 			}
-			slot &= uint64(i) << 24
+			slot |= uint64(i) << 24
 			return slot
 		}
 	}
@@ -85,8 +85,7 @@ func (db *DB) Get(key uint64) ([]byte, error) {
 // data, or fail with an error.
 func (db *DB) Delete(key uint64) error {
 	id := int(key >> 24)
-	db.buckets[id].Delete(key & 0x00FFFFFF)
-	return nil
+	return db.buckets[id].Delete(key & 0x00FFFFFF)
 }
 
 // OnDataFn is used to iterate the entire dataset in the DB.
@@ -99,7 +98,7 @@ func wrapBucketDataFn(bucketId int, onData OnDataFn) onBucketDataFn {
 		return nil
 	}
 	return func(slot uint64, data []byte) {
-		key := slot & uint64(bucketId) << 24
+		key := slot | uint64(bucketId)<<24
 		onData(key, data)
 	}
 }
