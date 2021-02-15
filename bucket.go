@@ -35,26 +35,14 @@ type Bucket struct {
 	slotSize uint16 // Size of the slots, up to 65K
 
 	gapsMu sync.Mutex // Mutex for operating on 'gaps' and 'tail'
-	gaps   []uint64   // A slice of indices to slots that are free to use.
-	tail   uint64     // First free slot
+	// A slice of indices to slots that are free to use. The
+	// gaps are always sorted lowest numbers first.
+	gaps sortedUniqueInts
+	tail uint64 // First free slot
 
 	fileMu sync.RWMutex // Mutex for file operations on 'f' (rw versus Close) and closed
 	f      *os.File     // The file backing the data
 	closed bool
-}
-
-type uint64Slice []uint64
-
-func (u uint64Slice) Len() int {
-	return len(u)
-}
-
-func (u uint64Slice) Less(i, j int) bool {
-	return u[i] < u[j]
-}
-
-func (u uint64Slice) Swap(i, j int) {
-	u[i], u[j] = u[j], u[i]
 }
 
 // openBucketAs is mainly exposed for testing purposes
@@ -151,11 +139,7 @@ func (bucket *Bucket) Put(data []byte) (uint64, error) {
 	return slot, nil
 }
 
-// Delete marks the data at the given slot of deletion. The caller must ensure
-// to NOT call this method multiple times for a given element, since doing so
-// may cause (future) corruption.
-// If a slot is deleted twice, the element will be in the GC-list twice, and may
-// cause the next two writes to both write into the same slot.
+// Delete marks the data at the given slot of deletion.
 // Delete does not touch the disk. When the bucket is Close():d, any remaining
 // gaps will be marked as such in the backing file.
 func (bucket *Bucket) Delete(slot uint64) error {
@@ -166,14 +150,10 @@ func (bucket *Bucket) Delete(slot uint64) error {
 	if slot >= bucket.tail {
 		return fmt.Errorf("%w: bucket %d, slot %d, tail %d", ErrBadIndex, bucket.slotSize, slot, bucket.tail)
 	}
-	bucket.gaps = append(bucket.gaps, slot)
 	// We try to keep writes going to the early parts of the file, to have the
 	// possibility of trimming the file when/if the tail becomes unused.
-	// Hence, order the gaps
-	sort.Sort(uint64Slice(bucket.gaps))
-	// We might be able to trim the file, or even fully delete it.
-	index := len(bucket.gaps) - 1
-	if bucket.tail == bucket.gaps[index]+1 {
+	bucket.gaps.Append(slot)
+	if bucket.tail == bucket.gaps.Last() {
 		// we can delete a portion of the file
 		bucket.fileMu.Lock()
 		defer bucket.fileMu.Unlock()
@@ -182,10 +162,9 @@ func (bucket *Bucket) Delete(slot uint64) error {
 			bucket.gaps = bucket.gaps[:0]
 			return ErrClosed
 		}
-		for len(bucket.gaps) > 0 && bucket.tail == bucket.gaps[index]+1 {
-			bucket.gaps = bucket.gaps[:index]
+		for len(bucket.gaps) > 0 && bucket.tail == bucket.gaps.Last() {
+			bucket.gaps = bucket.gaps[:len(bucket.gaps)-1]
 			bucket.tail--
-			index--
 		}
 		bucket.f.Truncate(int64(bucket.tail * uint64(bucket.slotSize)))
 	}
@@ -252,7 +231,7 @@ func (bucket *Bucket) getSlot() uint64 {
 	// Locate the first free slot
 	bucket.gapsMu.Lock()
 	defer bucket.gapsMu.Unlock()
-	if nGaps := len(bucket.gaps); nGaps > 0 {
+	if nGaps := bucket.gaps.Len(); nGaps > 0 {
 		slot = bucket.gaps[0]
 		bucket.gaps = bucket.gaps[1:]
 		return slot
@@ -280,16 +259,12 @@ func (bucket *Bucket) Iterate(onData onBucketDataFn) {
 	}
 
 	buf := make([]byte, bucket.slotSize)
-	// sort the known gaps, so we can skip them easily
-	sort.Slice(bucket.gaps, func(i, j int) bool {
-		return bucket.gaps[i] < bucket.gaps[j]
-	})
 	var (
 		nextGap = uint64(0xffffffffffffffff)
 		gapIdx  = 0
 	)
 
-	if len(bucket.gaps) > 0 {
+	if bucket.gaps.Len() > 0 {
 		nextGap = bucket.gaps[0]
 	}
 	var newGaps []uint64
@@ -324,7 +299,9 @@ func (bucket *Bucket) Iterate(onData onBucketDataFn) {
 		}
 		onData(slot, buf[itemHeaderSize:itemHeaderSize+blobLen])
 	}
-	bucket.gaps = append(bucket.gaps, newGaps...)
+	for _, g := range newGaps {
+		bucket.gaps.Append(g)
+	}
 }
 
 // compactBucket moves data 'up' to fill gaps, and truncates the file afterwards.
@@ -404,4 +381,26 @@ func (bucket *Bucket) compact(onData onBucketDataFn) {
 		bucket.f.Truncate(int64(bucket.tail * uint64(bucket.slotSize)))
 	}
 	bucket.gaps = make([]uint64, 0)
+}
+
+// sortedUniqueInts is a helper structure to maintain an ordered slice
+// of gaps. We keep them ordered to make writes prefer early slots, to increase
+// the chance of trimming the end of files upon deletion.
+type sortedUniqueInts []uint64
+
+func (u sortedUniqueInts) Len() int           { return len(u) }
+func (u sortedUniqueInts) Less(i, j int) bool { return u[i] < u[j] }
+func (u sortedUniqueInts) Swap(i, j int)      { u[i], u[j] = u[j], u[i] }
+func (u sortedUniqueInts) Last() uint64       { return u[len(u)-1] }
+
+func (u *sortedUniqueInts) Append(elem uint64) {
+	s := *u
+	size := len(s)
+	idx := sort.Search(size, func(i int) bool {
+		return elem <= s[i]
+	})
+	if idx < size && s[idx] == elem {
+		return // Elem already there
+	}
+	*u = append(s[:idx], append([]uint64{elem}, s[idx:]...)...)
 }

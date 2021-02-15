@@ -288,6 +288,42 @@ func TestCompaction(t *testing.T) {
 	}
 }
 
+func TestGapHeap(t *testing.T) {
+	fill := func(gaps *sortedUniqueInts)  {
+		gaps.Append(uint64(1))
+		gaps.Append(uint64(10))
+		gaps.Append(uint64(2))
+		gaps.Append(uint64(9))
+		gaps.Append(uint64(3))
+		gaps.Append(uint64(8))
+		gaps.Append(uint64(4))
+		gaps.Append(uint64(7))
+		gaps.Append(uint64(5))
+		gaps.Append(uint64(6))
+
+	}
+	gaps := make(sortedUniqueInts, 0)
+	fill(&gaps)
+	for i := uint64(10); gaps.Len() > 0; i-- {
+		if have, want := gaps.Last(), i; have != want {
+			t.Fatalf("have %d want %d", have, want)
+		}
+		gaps = gaps[:len(gaps)-1]
+	}
+	// Check uniqueness filter
+	fill(&gaps)
+	fill(&gaps)
+	fill(&gaps)
+	for i := uint64(10); gaps.Len() > 0; i-- {
+		if have, want := gaps.Last(), i; have != want {
+			t.Fatalf("have %d want %d", have, want)
+		}
+		gaps = gaps[:len(gaps)-1]
+	}
+
+
+}
+
 // TODO tests
 // - Test Put / Delete in parallel
 // - Test that simultaneous filewrites to different parts of the file don't cause problems
