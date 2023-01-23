@@ -1,3 +1,7 @@
+# Archived
+
+See https://github.com/holiman/billy instead.
+
 # BagDB
 
 BagDB is a super simple datastore. It can't _quite_ be called a database, because it avoids implementing some of the most complex parts of an actual database. It's intended to be used in very particular circumstances. 
